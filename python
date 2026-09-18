@@ -1,0 +1,211 @@
+import json
+import time
+from kivy.app import App
+from kivy.uix.button import Button
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.textinput import TextInput
+from kivy.uix.label import Label
+from kivy.clock import Clock
+from kivy.storage.jsonstore import JsonStore
+from plyer import bluetooth
+
+TARGET_NAME = "iTAG"
+
+class ITagControlApp(App):
+    def build(self):
+        self.store = JsonStore('config.json')
+        self.saved_mac = self.store.get('device').get('mac', '') if self.store.exists('device') else ''
+        self.saved_minutes = self.store.get('params').get('minutes', '1') if self.store.exists('params') else '1'
+        self.saved_seconds = self.store.get('params').get('seconds', '5') if self.store.exists('params') else '5'
+
+        self.led_timer_event = None
+        self.buzzer_timer_event = None
+        self.led_time_left = 0
+        self.buzzer_time_left = 0
+        self.is_connected = False
+
+        main_layout = BoxLayout(orientation='vertical', padding=20, spacing=15)
+
+        self.btn_connect = Button(
+            text="Подключить iTAG" if not self.saved_mac else "Подключить сохраненный iTAG", 
+            size_hint=(1, 0.15), font_size='16sp',
+            background_color=(0.2, 0.6, 1, 1), background_normal=''
+        )
+        self.btn_connect.bind(on_press=self.start_connect)
+        main_layout.add_widget(self.btn_connect)
+
+        led_box = BoxLayout(orientation='horizontal', size_hint=(1, 0.15), spacing=10)
+        self.btn_led = Button(text="Вкл. напряжение\\n(00:00)", size_hint=(0.5, 1), halign='center',
+                             background_color=(0.9, 0.1, 0.1, 1), background_normal='', disabled=True)
+        self.input_minutes = TextInput(text=self.saved_minutes, input_filter='int', multiline=False, size_hint=(0.2, 1), font_size='18sp', halign='center')
+        self.btn_led_start = Button(text="Пуск", size_hint=(0.3, 1), disabled=True)
+        
+        self.btn_led.bind(on_press=self.toggle_led_manual)
+        self.btn_led_start.bind(on_press=self.start_led_timer)
+        
+        led_box.add_widget(self.btn_led)
+        led_box.add_widget(Label(text="мин:", size_hint=(0.1, 1)))
+        led_box.add_widget(self.input_minutes)
+        led_box.add_widget(self.btn_led_start)
+        main_layout.add_widget(led_box)
+
+        buzzer_box = BoxLayout(orientation='horizontal', size_hint=(1, 0.15), spacing=10)
+        self.btn_buzzer = Button(text="Вкл. стартер\\n(0с)", size_hint=(0.5, 1), halign='center',
+                                background_color=(0.9, 0.1, 0.1, 1), background_normal='', disabled=True)
+        self.input_seconds = TextInput(text=self.saved_seconds, input_filter='int', multiline=False, size_hint=(0.2, 1), font_size='18sp', halign='center')
+        self.btn_buzzer_start = Button(text="Пуск", size_hint=(0.3, 1), disabled=True)
+        
+        self.btn_buzzer.bind(on_press=self.toggle_buzzer_manual)
+        self.btn_buzzer_start.bind(on_press=self.start_buzzer_timer)
+        
+        buzzer_box.add_widget(self.btn_buzzer)
+        buzzer_box.add_widget(Label(text="сек:", size_hint=(0.1, 1)))
+        buzzer_box.add_widget(self.input_seconds)
+        buzzer_box.add_widget(self.btn_buzzer_start)
+        main_layout.add_widget(buzzer_box)
+
+        btn_save = Button(text="Сохранить параметры", size_hint=(1, 0.12), background_color=(0.5, 0.5, 0.5, 1))
+        btn_save.bind(on_press=self.save_parameters)
+        main_layout.add_widget(btn_save)
+
+        return main_layout
+
+    def start_connect(self, instance):
+        self.btn_connect.text = "Поиск устройства..."
+        self.btn_connect.background_color = (0.6, 0.6, 0.6, 1)
+        Clock.schedule_once(self.connect_ble, 0.5)
+
+    def connect_ble(self, dt):
+        try:
+            if not bluetooth.is_enabled():
+                self.set_disconnected_state()
+                return
+
+            devices = bluetooth.get_devices()
+            target_mac = None
+
+            if self.saved_mac:
+                target_mac = self.saved_mac
+            else:
+                for mac, name in devices.items():
+                    if TARGET_NAME in name:
+                        target_mac = mac
+                        self.saved_mac = mac
+                        self.store.put('device', mac=mac)
+                        break
+
+            if target_mac:
+                self.is_connected = True
+                self.btn_connect.text = "Связь установлена"
+                self.btn_connect.background_color = (0.1, 0.8, 0.1, 1)
+                self.enable_controls(True)
+            else:
+                self.set_disconnected_state()
+        except Exception:
+            self.set_disconnected_state()
+
+    def set_disconnected_state(self):
+        self.is_connected = False
+        self.btn_connect.text = "Нет связи"
+        self.btn_connect.background_color = (0.9, 0.1, 0.1, 1)
+        self.enable_controls(False)
+        self.stop_all_timers()
+
+    def enable_controls(self, enable):
+        self.btn_led.disabled = not enable
+        self.btn_led_start.disabled = not enable
+        self.btn_buzzer.disabled = not enable
+        self.btn_buzzer_start.disabled = not enable
+
+    def send_command(self, value):
+        pass
+
+    def toggle_led_manual(self, instance):
+        if self.led_time_left > 0:
+            self.stop_led_timer(None)
+        else:
+            if self.btn_led.background_color == [0.9, 0.1, 0.1, 1]:
+                self.send_command(0x01)
+                self.btn_led.background_color = (0.1, 0.8, 0.1, 1)
+            else:
+                self.send_command(0x00)
+                self.btn_led.background_color = (0.9, 0.1, 0.1, 1)
+
+    def start_led_timer(self, instance):
+        self.stop_led_timer(None)
+        try:
+            minutes = int(self.input_minutes.text)
+            self.led_time_left = minutes * 60
+            if self.led_time_left > 0:
+                self.send_command(0x01)
+                self.btn_led.background_color = (0.1, 0.8, 0.1, 1)
+                self.led_timer_event = Clock.schedule_interval(self.update_led_timer, 1)
+        except ValueError:
+            pass
+
+    def update_led_timer(self, dt):
+        if self.led_time_left > 0:
+            self.led_time_left -= 1
+            m, s = divmod(self.led_time_left, 60)
+            self.btn_led.text = f"Вкл. напряжение\\n({m:02d}:{s:02d})"
+        else:
+            self.stop_led_timer(None)
+
+    def stop_led_timer(self, instance):
+        if self.led_timer_event:
+            Clock.unschedule(self.led_timer_event)
+            self.led_timer_event = None
+        self.led_time_left = 0
+        self.send_command(0x00)
+        self.btn_led.background_color = (0.9, 0.1, 0.1, 1)
+        self.btn_led.text = "Вкл. напряжение\\n(00:00)"
+
+    def toggle_buzzer_manual(self, instance):
+        if self.buzzer_time_left > 0:
+            self.stop_buzzer_timer(None)
+        else:
+            if self.btn_buzzer.background_color == [0.9, 0.1, 0.1, 1]:
+                self.send_command(0x01)
+                self.btn_buzzer.background_color = (0.1, 0.8, 0.1, 1)
+            else:
+                self.send_command(0x00)
+                self.btn_buzzer.background_color = (0.9, 0.1, 0.1, 1)
+
+    def start_buzzer_timer(self, instance):
+        self.stop_buzzer_timer(None)
+        try:
+            self.buzzer_time_left = int(self.input_seconds.text)
+            if self.buzzer_time_left > 0:
+                self.send_command(0x01)
+                self.btn_buzzer.background_color = (0.1, 0.8, 0.1, 1)
+                self.buzzer_timer_event = Clock.schedule_interval(self.update_buzzer_timer, 1)
+        except ValueError:
+            pass
+
+    def update_buzzer_timer(self, dt):
+        if self.buzzer_time_left > 0:
+            self.buzzer_time_left -= 1
+            self.btn_buzzer.text = f"Вкл. стартер\\n({self.buzzer_time_left}с)"
+        else:
+            self.stop_buzzer_timer(None)
+
+    def stop_buzzer_timer(self, instance):
+        if self.buzzer_timer_event:
+            Clock.unschedule(self.buzzer_timer_event)
+            self.buzzer_timer_event = None
+        self.buzzer_time_left = 0
+        self.send_command(0x00)
+        self.btn_buzzer.background_color = (0.9, 0.1, 0.1, 1)
+        self.btn_buzzer.text = "Вкл. стартер\\n(0с)"
+
+    def stop_all_timers(self):
+        if self.led_timer_event: Clock.unschedule(self.led_timer_event)
+        if self.buzzer_timer_event: Clock.unschedule(self.buzzer_timer_event)
+
+    def save_parameters(self, instance):
+        self.store.put('params', minutes=self.input_minutes.text, seconds=self.input_seconds.text)
+        if self.is_connected:
+            self.store.put('device', mac=self.saved_mac)
+
+if __name__ == "__main__":
+    ITagControlApp().run()
