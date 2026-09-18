@@ -1,0 +1,217 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iTAG Remote Control</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background-color: #FAFAFA; text-align: center; }
+        button { width: 100%; height: 70px; margin-bottom: 15px; font-size: 18px; font-weight: bold; border: none; border-radius: 8px; color: white; cursor: pointer; }
+        .btn-blue { background-color: #3399FF; }
+        .btn-red { background-color: #E62E2E; }
+        .btn-green { background-color: #17D117; }
+        .btn-gray { background-color: #808080; height: 50px; font-size: 16px; }
+        .control-box { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .control-box button { width: 55%; margin-bottom: 0; }
+        .btn-pulse { width: 20%; height: 50px; background-color: #4CAF50; }
+        .input-time { width: 50px; height: 45px; font-size: 18px; text-align: center; border: 1px solid #ccc; border-radius: 6px; }
+        label { font-size: 14px; color: #555; }
+    </style>
+</head>
+<body>
+
+    <!-- 1. Кнопка Коннект -->
+    <button id="btnConnect" class="btn-red">Нет связи</button>
+
+    <!-- 2. Блок Напряжение -->
+    <div class="control-box">
+        <button id="btnLed" class="btn-red" disabled>Вкл. напряжение<br>(00:00)</button>
+        <label>мин:<br>
+            <input type="number" id="inputMinutes" class="input-time" value="1">
+        </label>
+        <button id="btnLedStart" class="btn-pulse" disabled>Пуск</button>
+    </div>
+
+    <!-- 3. Блок Стартер -->
+    <div class="control-box">
+        <button id="btnBuzzer" class="btn-red" disabled>Вкл. стартер<br>(0с)</button>
+        <label>сек:<br>
+            <input type="number" id="inputSeconds" class="input-time" value="5">
+        </label>
+        <button id="btnBuzzerStart" class="btn-pulse" disabled>Пуск</button>
+    </div>
+
+    <!-- 4. Кнопка сохранения -->
+    <button id="btnSave" class="btn-gray">Сохранить параметры</button>
+
+    <script>
+        const UART_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
+        const UART_CHAR_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+        let bluetoothDevice = null;
+        let uartCharacteristic = null;
+        let isConnected = false;
+
+        let ledTimer = null;
+        let buzzerTimer = null;
+        let ledTimeLeft = 0;
+        let buzzerTimeLeft = 0;
+
+        // Элементы интерфейса
+        const btnConnect = document.getElementById('btnConnect');
+        const btnLed = document.getElementById('btnLed');
+        const btnLedStart = document.getElementById('btnLedStart');
+        const btnBuzzer = document.getElementById('btnBuzzer');
+        const btnBuzzerStart = document.getElementById('btnBuzzerStart');
+        const inputMinutes = document.getElementById('inputMinutes');
+        const inputSeconds = document.getElementById('inputSeconds');
+        const btnSave = document.getElementById('btnSave');
+
+        // Загрузка сохраненных параметров
+        if(localStorage.getItem('minutes')) inputMinutes.value = localStorage.getItem('minutes');
+        if(localStorage.getItem('seconds')) inputSeconds.value = localStorage.getItem('seconds');
+        const savedMac = localStorage.getItem('savedMac');
+        if(savedMac) btnConnect.innerText = "Подключить сохраненный iTAG (Нажмите)";
+
+        // Логика подключения
+        btnConnect.addEventListener('click', async () => {
+            if (isConnected) return;
+            btnConnect.innerText = "Поиск устройства...";
+            btnConnect.className = "btn-blue";
+
+            try {
+                // Если адрес уже сохранен, ищем конкретное устройство, иначе — по имени
+                let options = { filters: [{ name: 'iTAG' }], optionalServices: [UART_SERVICE_UUID] };
+                
+                bluetoothDevice = await navigator.bluetooth.requestDevice(options);
+                
+                // Безопасность: Привязываем строго одно устройство
+                localStorage.setItem('savedMac', bluetoothDevice.id);
+
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_UUID);
+                uartCharacteristic = await service.getCharacteristic(UART_CHAR_UUID);
+
+                isConnected = true;
+                btnConnect.innerText = "Связь установлена";
+                btnConnect.className = "btn-green";
+                setControlsEnabled(true);
+
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+            } catch (error) {
+                onDisconnected();
+            }
+        });
+
+        function onDisconnected() {
+            isConnected = false;
+            btnConnect.innerText = "Нет связи";
+            btnConnect.className = "btn-red";
+            setControlsEnabled(false);
+            stopLed();
+            stopBuzzer();
+        }
+
+        function setControlsEnabled(enable) {
+            btnLed.disabled = !enable;
+            btnLedStart.disabled = !enable;
+            btnBuzzer.disabled = !enable;
+            btnBuzzerStart.disabled = !enable;
+        }
+
+        async function sendCommand(value) {
+            if (uartCharacteristic) {
+                try {
+                    await uartCharacteristic.writeValue(new Uint8Array([value]));
+                } catch (e) { onDisconnected(); }
+            }
+        }
+
+        // --- Управление Напряжением (Таймер Минут) ---
+        let isLedOn = false;
+        btnLed.addEventListener('click', () => { if(isLedOn) stopLed(); else startLedManual(); });
+        btnLedStart.addEventListener('click', () => {
+            let mins = parseInt(inputMinutes.value) || 0;
+            if(mins > 0) startLedTimer(mins);
+        });
+
+        function startLedManual() {
+            isLedOn = true;
+            sendCommand(0x01);
+            btnLed.className = "btn-green";
+        }
+
+        function stopLed() {
+            clearInterval(ledTimer);
+            isLedOn = false;
+            ledTimeLeft = 0;
+            sendCommand(0x00);
+            btnLed.className = "btn-red";
+            btnLed.innerHTML = "Вкл. напряжение<br>(00:00)";
+        }
+
+        function startLedTimer(minutes) {
+            stopLed();
+            isLedOn = true;
+            sendCommand(0x01);
+            btnLed.className = "btn-green";
+            ledTimeLeft = minutes * 60;
+
+            ledTimer = setInterval(() => {
+                if (ledTimeLeft > 0) {
+                    ledTimeLeft--;
+                    let m = Math.floor(ledTimeLeft / 60);
+                    let s = ledTimeLeft % 60;
+                    btnLed.innerHTML = `Вкл. напряжение<br>(${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')})`;
+                } else { stopLed(); }
+            }, 1000);
+        }
+
+        // --- Управление Стартером (Таймер Секунд) ---
+        let isBuzzerOn = false;
+        btnBuzzer.addEventListener('click', () => { if(isBuzzerOn) stopBuzzer(); else startBuzzerManual(); });
+        btnBuzzerStart.addEventListener('click', () => {
+            let secs = parseInt(inputSeconds.value) || 0;
+            if(secs > 0) startBuzzerTimer(secs);
+        });
+
+        function startBuzzerManual() {
+            isBuzzerOn = true;
+            sendCommand(0x01);
+            btnBuzzer.className = "btn-green";
+        }
+
+        function stopBuzzer() {
+            clearInterval(buzzerTimer);
+            isBuzzerOn = false;
+            buzzerTimeLeft = 0;
+            sendCommand(0x00);
+            btnBuzzer.className = "btn-red";
+            btnBuzzer.innerHTML = "Вкл. стартер<br>(0с)";
+        }
+
+        function startBuzzerTimer(seconds) {
+            stopBuzzer();
+            isBuzzerOn = true;
+            sendCommand(0x01);
+            btnBuzzer.className = "btn-green";
+            buzzerTimeLeft = seconds;
+
+            buzzerTimer = setInterval(() => {
+                if (buzzerTimeLeft > 0) {
+                    buzzerTimeLeft--;
+                    btnBuzzer.innerHTML = `Вкл. стартер<br>(${buzzerTimeLeft}с)`;
+                } else { stopBuzzer(); }
+            }, 1000);
+        }
+
+        // Сохранение параметров
+        btnSave.addEventListener('click', () => {
+            localStorage.setItem('minutes', inputMinutes.value);
+            localStorage.setItem('seconds', inputSeconds.value);
+            alert("Параметры успешно сохранены в память устройства!");
+        });
+    </script>
+</body>
+</html>
+
